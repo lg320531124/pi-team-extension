@@ -1,0 +1,26 @@
+{
+  "name": "pi-team-extension",
+  "version": "0.1.0",
+  "description": "Agent Team extension for @earendil-works/pi — peer-to-peer multi-agent coordination with leader, mailbox messaging, shared task board, and git worktree isolation.",
+  "type": "module",
+  "main": "src/index.ts",
+  "bin": {
+    "pi-team": "src/cli.ts"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "^0.82.0",
+    "@earendil-works/pi-ai": "^0.82.0",
+    "@earendil-works/pi-coding-agent": "^0.82.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "ignore": "^7.0.6",
+    "typescript": "^5.5.0",
+    "yaml": "^2.9.0"
+  },
+  "license": "MIT"
+}
