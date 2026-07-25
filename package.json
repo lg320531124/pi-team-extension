@@ -22,5 +22,8 @@
     "typescript": "^5.5.0",
     "yaml": "^2.9.0"
   },
+  "pi": {
+    "extensions": ["./src/extension.ts"]
+  },
   "license": "MIT"
 }

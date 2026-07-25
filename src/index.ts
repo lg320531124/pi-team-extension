@@ -19,6 +19,7 @@ export { parseTeamYaml, TeamSchemaError } from "./team/schema.js";
 export { createSendMessageTool } from "./team/tools/send-message.js";
 export { createBroadcastTool } from "./team/tools/broadcast.js";
 export { createTeamTasksTool } from "./team/tools/team-tasks.js";
+export { default as teamExtension } from "./extension.js";
 export type {
 	AgentHandle,
 	AgentStatus,

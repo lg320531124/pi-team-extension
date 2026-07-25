@@ -16,12 +16,32 @@ pi ships a single-agent ReAct loop. This package adds:
 - **Mailbox → steering bridge** — incoming messages land in pi's native `agent.steer()` queue, consumed on the next turn
 - **Auto error notification** — a worker whose turn fails notifies the leader (mirrors CC agent-teams v2.1.198+)
 
-## Install
+## Install as a pi extension (preferred)
 
 ```bash
-# From inside the pi monorepo (workspace link), or standalone:
+pi install lg320531124/pi-team-extension
+pi list   # confirm it shows up
+```
+
+Then inside pi:
+
+```
+/team run test/team-demo.yml
+```
+
+The extension reuses pi's own model registry and API-key resolution — no separate `PI_API_KEY` needed. See [`docs/PI-EXTENSION-INTEGRATION.md`](docs/PI-EXTENSION-INTEGRATION.md) for details.
+
+## Standalone CLI (alternative)
+
+For consumers not running pi:
+
+```bash
+git clone https://github.com/lg320531124/pi-team-extension
 cd pi-team-extension
-npm install   # or bun install
+bun install
+export PI_API_KEY=sk-...
+export PI_DEFAULT_MODEL=claude-sonnet-4-6
+bun src/cli.ts run test/team-demo.yml
 ```
 
 `package.json` uses `file:` links to `../pi/packages/{agent,ai,coding-agent}`. Adjust paths if your checkout differs.
