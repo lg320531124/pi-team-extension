@@ -79,6 +79,20 @@ coordinator.on("team_done", () => console.log("team complete"));
 await coordinator.start();
 ```
 
+## MCP tool injection
+
+Team members can use MCP tools. Put a `.mcp.json` in the project root (standard MCP config: `mcpServers` with `command`/`args` for stdio servers, or `type: http`/`url`):
+
+```json
+{
+  "mcpServers": {
+    "docs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-docs"] }
+  }
+}
+```
+
+When a team starts, each MCP server is connected (stdio via subprocess, HTTP via fetch) and its tools are injected into every member's tool set alongside the builtin and team tools. Servers are closed when the team stops. This works because the extension ships its own minimal MCP client — pi itself has no native MCP support.
+
 ## Natural-language team startup (`start_team` tool)
 
 No YAML needed. Just tell pi to start an agent team — the main model calls the `start_team` tool automatically:
