@@ -25,7 +25,7 @@ import { resolve } from "node:path";
 import { TeamCoordinator } from "./team/coordinator.js";
 import { parseTeamYaml } from "./team/schema.js";
 import { buildDefaultTeamDef } from "./team/default-team.js";
-import { loadMcpServers, McpClient, mcpToolToAgentTool } from "./team/mcp.js";
+import { loadMcpServers, loadGlobalMcpServers, mergeMcpServers, McpClient, mcpToolToAgentTool } from "./team/mcp.js";
 
 /** Active MCP clients per cwd (main-session injection). */
 const mcpClientsByCwd = new Map<string, McpClient[]>();
@@ -369,7 +369,7 @@ export default function teamExtension(pi: ExtensionAPI): void {
 							? params.model
 							: `${auth.model.provider}/${params.model ?? auth.model.id}`,
 					cwd: ctx.cwd,
-					mcpServers: loadMcpServers(ctx.cwd),
+					mcpServers: mergeMcpServers(loadMcpServers(ctx.cwd), loadGlobalMcpServers()),
 				},
 				makeModelResolver(ctx),
 			);

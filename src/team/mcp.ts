@@ -68,6 +68,40 @@ export function loadMcpServers(projectDir: string): McpServerConfig[] {
 	return [];
 }
 
+/**
+ * Load MCP servers from global config: Claude Code's `~/.claude.json`
+ * `mcpServers`, then a plain `~/.mcp.json` if present. Lets pi reuse the
+ * same global MCP servers as Claude Code.
+ */
+export function loadGlobalMcpServers(): McpServerConfig[] {
+	const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+	const candidates = [join(home, ".claude.json"), join(home, ".mcp.json")];
+	for (const file of candidates) {
+		if (!existsSync(file)) continue;
+		try {
+			const parsed = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+			const servers = parsed.mcpServers ?? parsed;
+			if (typeof servers !== "object" || servers === null) continue;
+			return Object.entries(servers as Record<string, unknown>)
+				.map(([name, cfg]) => normalizeServerConfig(name, cfg))
+				.filter((c): c is McpServerConfig => c !== null);
+		} catch {
+			continue;
+		}
+	}
+	return [];
+}
+
+/** Merge project + global servers; project wins on name collision. */
+export function mergeMcpServers(
+	project: McpServerConfig[],
+	global: McpServerConfig[],
+): McpServerConfig[] {
+	const byName = new Map<string, McpServerConfig>();
+	for (const s of [...global, ...project]) byName.set(s.name, s);
+	return [...byName.values()];
+}
+
 function normalizeServerConfig(
 	name: string,
 	raw: unknown,
