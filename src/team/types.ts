@@ -71,6 +71,9 @@ export interface TeamState {
 	startedAt: number;
 }
 
+/** Whether a worker's worktree holds commits / uncommitted changes / nothing. */
+export type ContributionState = "contributed" | "modified" | "clean";
+
 /** Runtime handle for a team member (leader or worker). */
 export interface AgentHandle {
 	name: string;
@@ -105,7 +108,12 @@ export interface MailboxLike {
 export interface WorktreeLike {
 	readonly path: string;
 	readonly branch: string;
-	cleanup(): Promise<void>;
+	/** v2: contribution classification vs the worktree's creation baseline. */
+	contributionState?(): Promise<ContributionState>;
+	/** v2: latest commit relative to the baseline, if any. */
+	lastCommit?(): Promise<{ hash: string; message: string } | null>;
+	/** v2: force=true overrides the "preserve dirty/committed" safety. */
+	cleanup(force?: boolean): Promise<void>;
 }
 
 /** Configuration passed to TeamCoordinator. */

@@ -12,7 +12,8 @@ pi ships a single-agent ReAct loop. This package adds:
 - **`send_message`** — any agent messages any other agent directly (no leader routing)
 - **`broadcast`** — message all teammates at once
 - **`team_tasks`** — shared task board with dependencies (`blocked_by`); leader adds, workers claim/complete
-- **Git worktree isolation** — each worker writes in its own worktree, zero file conflicts
+- **Git worktree isolation** — each worker writes in its own worktree under `.pi/worktrees/`, zero file conflicts
+- **Contribution merge-back** — workers commit their changes; the leader merges each worker's branch back into main (serialized, `--no-ff`), or preserves the branch on conflict
 - **Mailbox → steering bridge** — incoming messages land in pi's native `agent.steer()` queue, consumed on the next turn
 - **Auto error notification** — a worker whose turn fails notifies the leader (mirrors CC agent-teams v2.1.198+)
 
@@ -100,7 +101,15 @@ team:
       task: Wait for the coder to send you code.
 ```
 
-Each worker gets its own git worktree by default. Set `worktree: false` to share the leader's cwd.
+Each worker gets its own git worktree by default, created under `.pi/worktrees/<worker>` on a stable `team/<worker>` branch. Set `worktree: false` to share the leader's cwd.
+
+When a worker finishes, its worktree is classified by contribution:
+
+- **clean** (no commits, no changes) → worktree removed automatically
+- **committed** → branch merged back into your main branch (`git merge --no-ff`), then removed
+- **uncommitted changes / merge conflict** → worktree **preserved** and reported — never force-deleted
+
+Interrupted runs can resume: re-running the team reuses the existing `team/<worker>` worktree. Add `.pi/worktrees/` to your `.gitignore`.
 
 ## How it works
 
@@ -129,7 +138,7 @@ The leader is just another team member with `add` permission on the task board. 
 
 - Same-process only (no cross-machine)
 - Team composition fixed at YAML time (no dynamic teammate spawn)
-- Team dissolves when the process exits (worktrees + mailbox files auto-cleaned)
+- Team dissolves when the process exits (mailbox files auto-cleaned; worktrees preserved if they hold work)
 - No split-pane TUI (single terminal)
 - Model resolver must be wired by the caller (CLI ships a placeholder)
 

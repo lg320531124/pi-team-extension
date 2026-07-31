@@ -19,6 +19,8 @@ import {
 	createReadTool,
 	createWriteTool,
 } from "@earendil-works/pi-coding-agent";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { EventEmitter } from "node:events";
 import { Mailbox } from "./mailbox.js";
 import { MessageBus } from "./message-bus.js";
@@ -35,6 +37,8 @@ import type {
 } from "./types.js";
 import { GitWorktree } from "./worktree.js";
 
+const exec = promisify(execFile);
+
 export interface CoordinatorEvents {
 	message: (msg: { from: string; to: string; content: string }) => void;
 	agent_done: (name: string) => void;
@@ -47,6 +51,13 @@ export class TeamCoordinator extends EventEmitter {
 	private readonly teamDef: TeamDefinition;
 	private readonly config: Required<TeamConfig>;
 	private readonly modelResolver: (id: string) => Model<any> | undefined;
+	private _completionPromise: Promise<void> | null = null;
+	/** Serializes git merges back into the main branch (git locks the index). */
+	private mergeChain: Promise<void> = Promise.resolve();
+	private readonly mergeResults = new Map<
+		string,
+		{ branch: string; hash?: string; message?: string; error?: string }
+	>();
 
 	constructor(
 		teamDef: TeamDefinition,
@@ -145,10 +156,17 @@ export class TeamCoordinator extends EventEmitter {
 			let workerCwd = this.config.cwd;
 			if (wDef.worktree !== false) {
 				try {
-					const wt = await GitWorktree.create({
+					// Reuse a worktree left by a previous run; otherwise create fresh.
+					const existing = await GitWorktree.find({
 						repoRoot: this.config.repoRoot,
 						name: wName,
 					});
+					const wt =
+						existing ??
+						(await GitWorktree.create({
+							repoRoot: this.config.repoRoot,
+							name: wName,
+						}));
 					handle.worktree = wt;
 					workerCwd = wt.path;
 				} catch (e) {
@@ -188,9 +206,13 @@ export class TeamCoordinator extends EventEmitter {
 		}
 
 		// Run leader + workers concurrently. Each session.start() resolves when
-		// that agent's ReAct loop completes (or errors).
+		// that agent's ReAct loop completes (or errors). team_done fires only
+		// after all contribution merges have been serialized back to main.
 		const all = [this.runAgent(this.teamDef.leader.name, leaderSession), ...workerRuns];
-		void Promise.allSettled(all).then(() => this.emit("team_done"));
+		this._completionPromise = Promise.allSettled(all).then(async () => {
+			await this.mergeChain;
+			this.emit("team_done");
+		});
 
 		return this.state;
 	}
@@ -201,12 +223,84 @@ export class TeamCoordinator extends EventEmitter {
 			const handle = this.handleFor(name);
 			if (handle) handle.status = "done";
 			this.emit("agent_done", name);
+			await this.finalizeWorktree(name, handle);
 		} catch (e) {
 			const handle = this.handleFor(name);
 			if (handle) handle.status = "error";
 			const msg = e instanceof Error ? e.message : String(e);
 			this.emit("agent_error", name, msg);
 		}
+	}
+
+	/**
+	 * Classify the worker's worktree contribution after the agent finishes:
+	 *  - clean       → remove the worktree
+	 *  - contributed → queue a serialized merge of the branch back into main
+	 *  - modified    → preserve + warn (uncommitted changes must not be lost)
+	 */
+	private async finalizeWorktree(
+		name: string,
+		handle: AgentHandle | undefined,
+	): Promise<void> {
+		const wt = handle?.worktree as GitWorktree | undefined;
+		if (!wt) return;
+		try {
+			const state = await wt.contributionState();
+			if (state === "clean") {
+				await wt.cleanup();
+				handle!.worktree = undefined;
+			} else if (state === "contributed") {
+				this.enqueueMerge(name, handle!, wt);
+			} else {
+				this.emit(
+					"agent_error",
+					name,
+					`worktree has uncommitted changes — preserved at ${wt.path} (branch ${wt.branch})`,
+				);
+			}
+		} catch (e) {
+			this.emit(
+				"agent_error",
+				name,
+				`worktree finalization failed: ${e instanceof Error ? e.message : String(e)}`,
+			);
+		}
+	}
+
+	/** Serialize merges: git locks the index, concurrent merges would conflict. */
+	private enqueueMerge(name: string, handle: AgentHandle, wt: GitWorktree): void {
+		this.mergeChain = this.mergeChain.then(async () => {
+			try {
+				const commit = await wt.lastCommit();
+				if (!commit) {
+					// No commits relative to baseline after all — nothing to merge.
+					await wt.cleanup();
+					handle.worktree = undefined;
+					return;
+				}
+				await exec(
+					"git",
+					["merge", "--no-ff", wt.branch, "-m", `team: merge ${name} contribution`],
+					{ cwd: this.config.repoRoot },
+				);
+				this.mergeResults.set(name, {
+					branch: wt.branch,
+					hash: commit.hash,
+					message: commit.message,
+				});
+				// Merged into main — the worktree (and branch) are consumed.
+				await wt.cleanup(true);
+				handle.worktree = undefined;
+			} catch (e) {
+				const msg = e instanceof Error ? e.message : String(e);
+				this.mergeResults.set(name, { branch: wt.branch, error: msg });
+				this.emit(
+					"agent_error",
+					name,
+					`merge of branch ${wt.branch} into main failed: ${msg} — branch preserved at ${wt.path}`,
+				);
+			}
+		});
 	}
 
 	private handleFor(name: string): AgentHandle | undefined {
@@ -263,16 +357,51 @@ export class TeamCoordinator extends EventEmitter {
 		];
 	}
 
+	/** Wait for all agents to complete (leader + workers). */
+	async waitForCompletion(): Promise<void> {
+		await this._completionPromise;
+	}
+
 	async stop(): Promise<void> {
 		if (!this.state) return;
+		// Allow agents to finish naturally before force-stopping.
+		await this._completionPromise;
 		const all = [this.state.leader, ...this.state.workers.values()];
 		await Promise.allSettled(
 			all.map(async (h) => {
 				if (h.session) await h.session.stop();
-				if (h.worktree) await h.worktree.cleanup();
+				if (h.worktree) {
+					const wt = h.worktree as GitWorktree;
+					try {
+						const state = await wt.contributionState();
+						if (state === "clean") {
+							await wt.cleanup();
+						} else {
+							this.emit(
+								"agent_error",
+								h.name,
+								`worktree preserved at ${wt.path} (branch ${wt.branch}, ${state})`,
+							);
+						}
+					} catch {
+						// Worktree dir may already be gone — force-clean leftovers.
+						await wt.cleanup(true);
+					}
+				}
 				if (h.mailbox?.clearFile) await h.mailbox.clearFile();
 			}),
 		);
+	}
+
+	/** Merge results per worker: { name, branch, hash?, message?, error? }. */
+	getResults(): {
+		name: string;
+		branch: string;
+		hash?: string;
+		message?: string;
+		error?: string;
+	}[] {
+		return [...this.mergeResults.entries()].map(([name, r]) => ({ name, ...r }));
 	}
 
 	async stopAgent(name: string): Promise<void> {

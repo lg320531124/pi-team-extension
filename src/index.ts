@@ -10,7 +10,7 @@ export type { CoordinatorEvents } from "./team/coordinator.js";
 export { TeamAgentSession } from "./team/session.js";
 export type { TeamAgentSessionOptions } from "./team/session.js";
 export { GitWorktree } from "./team/worktree.js";
-export type { GitWorktreeOptions } from "./team/worktree.js";
+export type { GitWorktreeOptions, ContributionState } from "./team/worktree.js";
 export { MessageBus } from "./team/message-bus.js";
 export type { MessageBusEvents } from "./team/message-bus.js";
 export { Mailbox } from "./team/mailbox.js";

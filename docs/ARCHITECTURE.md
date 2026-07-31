@@ -114,12 +114,13 @@ pi 本身是单 Agent ReAct 循环。这个扩展给它加上**多 Agent 对等�
 │                                                              │
 │  Worker 有自己的 GitWorktree                                 │
 │  ┌──────────────────────────────────────┐                    │
-│  │  git worktree add --detach           │                    │
-│  │    -b team/{name}/{snowflake}        │                    │
-│  │    /tmp/pi-team-{name}-{snowflake}   │                    │
+│  │  git worktree add -b team/{name}     │                    │
+│  │    <repo>/.pi/worktrees/{name}       │                    │
 │  │                                      │                    │
-│  │  cleanup() → git worktree remove     │                    │
-│  │           → git branch -D            │                    │
+│  │  contributionState() →               │                    │
+│  │    clean → cleanup() 删             │                    │
+│  │    committed → merge 回主分支 → 删   │                    │
+│  │    modified/冲突 → 保留              │                    │
 │  └──────────────────────────────────────┘                    │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -155,7 +156,7 @@ Worker 调 send_message(to="reviewer", content="PR 看完了")
 | `src/team/session.ts` | 170 | 轻量 Agent 包装：system prompt 拼装 + mailbox bridge + 错误通知 |
 | `src/team/message-bus.ts` | 99 | 进程内消息路由：send/broadcast/register/历史记录/发送计数 |
 | `src/team/mailbox.ts` | 86 | 每成员邮箱：内存队列 + JSON 文件持久化 + capacity 限制 |
-| `src/team/worktree.ts` | 71 | Git worktree 创建和清理：`git worktree add/remove` |
+| `src/team/worktree.ts` | ~150 | Git worktree v2：`.pi/worktrees/` 隔离、稳定分支、贡献分类（contributed/modified/clean）、安全清理 |
 | `src/team/schema.ts` | 266 | YAML 解析和校验：优先 `yaml` 包，回退手写解析器 |
 | `src/team/types.ts` | 131 | 所有 TS 类型定义（TeamDefinition/TeamState/TeamMessage/TeamTask 等） |
 | `src/team/tools/send-message.ts` | -- | `send_message` AgentTool 实现 |
@@ -188,7 +189,7 @@ Worker 调 send_message(to="reviewer", content="PR 看完了")
 4. new TeamAgentSession(leader) — 传入 builtinTools + teamTools + mailbox + messageBus
 5. 标记 leader handle.status = "running"
 6. 对每个 Worker：
-   a. 如果 worktree !== false → GitWorktree.create() → 新 worktree 路径
+   a. 如果 worktree !== false → GitWorktree.find() 复用或 create() → 新 worktree 路径（`.pi/worktrees/<worker>`，分支 `team/<worker>`）
    b. 从 modelResolver 解析 Worker 模型
    c. new TeamAgentSession(worker) — builtinTools 的 cwd 指向 worktree 路径
    d. 标记 worker handle.status = "running"

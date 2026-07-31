@@ -108,7 +108,7 @@ export class TeamAgentSession implements TeamAgentSessionLike {
 		const leaderHint = this.isLeader
 			? "You are the TEAM LEADER. Decompose the goal into tasks, create them via team_tasks, dispatch to workers, arbitrate, and synthesize the final result."
 			: "You are a WORKER. Claim tasks via team_tasks, do the work, mark them complete, and report to the leader via send_message. You may message any teammate directly — you do not need to route through the leader.";
-		return [
+		const lines = [
 			roleLine,
 			"",
 			leaderHint,
@@ -121,7 +121,19 @@ export class TeamAgentSession implements TeamAgentSessionLike {
 			"Tasks: use team_tasks to list/add/assign/complete. add is leader-only.",
 			"",
 			`Initial task:\n${opts.task}`,
-		].join("\n");
+		];
+		if (!this.isLeader) {
+			lines.push(
+				"",
+				"Completion protocol (MANDATORY when you changed files):",
+				"- Commit your work before you stop: git add <only files you changed> (NEVER git add . or git add -A)",
+				"- Use a clear, descriptive commit message",
+				"- Report the commit hash and a one-line summary of what you did in your final message to the leader",
+				"- Do not fix unrelated issues; if you find any, mention them as follow-ups instead",
+				"- If the task is impossible, stop and explain why to the leader",
+			);
+		}
+		return lines.join("\n");
 	}
 
 	async start(): Promise<void> {
