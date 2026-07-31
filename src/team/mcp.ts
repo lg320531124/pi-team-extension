@@ -139,9 +139,12 @@ export class McpClient {
 	private closed = false;
 	private toolsCache: McpToolDef[] | null = null;
 	private buffer = "";
+	/** Per-request timeout in ms (default 30s; shorter for best-effort global MCP). */
+	private readonly timeoutMs: number;
 
-	constructor(cfg: McpServerConfig) {
+	constructor(cfg: McpServerConfig, timeoutMs = 30000) {
 		this.name = cfg.name;
+		this.timeoutMs = timeoutMs;
 		if (cfg.command) {
 			this.proc = spawn(cfg.command, cfg.args ?? [], {
 				env: cfg.env ? { ...process.env, ...cfg.env } : process.env,
@@ -217,9 +220,9 @@ export class McpClient {
 			// safety timeout
 			setTimeout(() => {
 				if (this.pending.delete(id)) {
-					reject(new Error(`MCP ${method} timed out after 30s`));
+					reject(new Error(`MCP ${method} timed out after ${this.timeoutMs}ms`));
 				}
-			}, 30000).unref();
+			}, this.timeoutMs).unref();
 		});
 	}
 

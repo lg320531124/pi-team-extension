@@ -42,7 +42,8 @@ async function registerMainSessionMcpTools(pi: ExtensionAPI, cwd: string): Promi
 
 	const clients: McpClient[] = [];
 	const tasks = servers.map(async (cfg) => {
-		const client = new McpClient(cfg);
+		// Best-effort global servers: short timeout so slow servers don't stall startup.
+		const client = new McpClient(cfg, 8000);
 		try {
 			const tools = await client.connect();
 			clients.push(client);
@@ -248,7 +249,8 @@ export default function teamExtension(pi: ExtensionAPI): void {
 	// their tools to the main agent. Runs on session start (cwd known), closes
 	// on shutdown. Failures are silent — MCP is best-effort.
 	pi.on("session_start", (event, ctx) => {
-		void registerMainSessionMcpTools(pi, ctx.cwd).catch(() => {});
+		// Await (per-server 8s cap) so MCP tools are registered before the first turn.
+		return registerMainSessionMcpTools(pi, ctx.cwd).catch(() => {});
 	});
 	pi.on("session_shutdown", () => {
 		const all = [...mcpClientsByCwd.values()].flat();
