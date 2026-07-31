@@ -25,7 +25,54 @@ import { resolve } from "node:path";
 import { TeamCoordinator } from "./team/coordinator.js";
 import { parseTeamYaml } from "./team/schema.js";
 import { buildDefaultTeamDef } from "./team/default-team.js";
-import { loadMcpServers } from "./team/mcp.js";
+import { loadMcpServers, McpClient, mcpToolToAgentTool } from "./team/mcp.js";
+
+/** Active MCP clients per cwd (main-session injection). */
+const mcpClientsByCwd = new Map<string, McpClient[]>();
+
+/**
+ * Register MCP tools from the project's .mcp.json into the main session.
+ * Called on session_start so cwd is known; tools get an `mcp_<server>_<tool>`
+ * name to avoid collisions. Clients close on session_shutdown.
+ */
+async function registerMainSessionMcpTools(pi: ExtensionAPI, cwd: string): Promise<void> {
+	if (mcpClientsByCwd.has(cwd)) return; // already registered for this cwd
+	const servers = loadMcpServers(cwd);
+	if (servers.length === 0) return;
+
+	const clients: McpClient[] = [];
+	const tasks = servers.map(async (cfg) => {
+		const client = new McpClient(cfg);
+		try {
+			const tools = await client.connect();
+			clients.push(client);
+			for (const t of tools) {
+				const name = `mcp_${cfg.name}_${t.name}`;
+				const wrapped = mcpToolToAgentTool(client, t);
+				pi.registerTool({
+					name,
+					label: `MCP: ${cfg.name}/${t.name}`,
+					description: `MCP tool \`${t.name}\` from server \`${cfg.name}\` (${cwd}/.mcp.json). ${t.description ?? ""}`,
+					parameters: wrapped.parameters as never,
+					async execute(toolCallId: string, params: never) {
+						const result = await wrapped.execute(
+							toolCallId,
+							(params as Record<string, unknown> | undefined) ?? {},
+						);
+						return result as { content: { type: "text"; text: string }[]; details: Record<string, unknown> };
+					},
+				});
+			}
+		} catch (e) {
+			console.error(
+				`[team-extension] MCP server "${cfg.name}" failed: ${e instanceof Error ? e.message : String(e)}`,
+			);
+			await client.close().catch(() => {});
+		}
+	});
+	await Promise.allSettled(tasks);
+	if (clients.length > 0) mcpClientsByCwd.set(cwd, clients);
+}
 
 /** Resolve the session model + API key from pi's own registry. */
 async function resolveAuth(
@@ -197,6 +244,18 @@ function formatTeamResult(coordinator: TeamCoordinator): string {
 }
 
 export default function teamExtension(pi: ExtensionAPI): void {
+	// Main-session MCP injection: connect project .mcp.json servers and expose
+	// their tools to the main agent. Runs on session start (cwd known), closes
+	// on shutdown. Failures are silent — MCP is best-effort.
+	pi.on("session_start", (event, ctx) => {
+		void registerMainSessionMcpTools(pi, ctx.cwd).catch(() => {});
+	});
+	pi.on("session_shutdown", () => {
+		const all = [...mcpClientsByCwd.values()].flat();
+		mcpClientsByCwd.clear();
+		void Promise.allSettled(all.map((c) => c.close().catch(() => {})));
+	});
+
 	pi.registerCommand("team", {
 		description: "Agent team coordination. Usage: /team run <file.yml>",
 		async handler(args: string, ctx: ExtensionCommandContext): Promise<void> {
