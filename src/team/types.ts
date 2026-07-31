@@ -10,6 +10,7 @@
  */
 import type { Model, ThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentTool, AgentMessage } from "@earendil-works/pi-agent-core";
+import type { McpServerConfig } from "./mcp.js";
 
 /** YAML team definition root. */
 export interface TeamDefinition {
@@ -134,6 +135,8 @@ export interface TeamConfig {
 	maxMessagesPerAgent?: number;
 	/** Steering-bridge poll interval in ms. Default 500. */
 	pollIntervalMs?: number;
+	/** MCP servers to inject into every member's tool set. */
+	mcpServers?: McpServerConfig[];
 }
 
 /** Re-exported pi types for convenience. */

@@ -37,6 +37,9 @@ import type {
 	TeamTask,
 } from "./types.js";
 import { GitWorktree } from "./worktree.js";
+import { McpClient, mcpToolToAgentTool } from "./mcp.js";
+import type { McpServerConfig } from "./mcp.js";
+import type { AgentTool as McpAgentTool } from "@earendil-works/pi-agent-core";
 
 const exec = promisify(execFile);
 
@@ -59,6 +62,8 @@ export class TeamCoordinator extends EventEmitter {
 		string,
 		{ branch: string; hash?: string; message?: string; error?: string }
 	>();
+	private mcpClients: McpClient[] = [];
+	private mcpTools: McpAgentTool<any>[] = [];
 
 	constructor(
 		teamDef: TeamDefinition,
@@ -75,6 +80,7 @@ export class TeamCoordinator extends EventEmitter {
 			mailboxCapacity: config.mailboxCapacity ?? 10,
 			maxMessagesPerAgent: config.maxMessagesPerAgent ?? 200,
 			pollIntervalMs: config.pollIntervalMs ?? 500,
+			mcpServers: config.mcpServers ?? [],
 		};
 		this.modelResolver = modelResolver;
 	}
@@ -83,6 +89,9 @@ export class TeamCoordinator extends EventEmitter {
 		const bus = new MessageBus();
 		const tasks: TeamTask[] = [];
 		const startedAt = Date.now();
+
+		// Connect MCP servers and collect their tools (shared across members).
+		await this.connectMcpServers();
 
 		// Leader handle first (registered first so workers can find it).
 		const leaderHandle: AgentHandle = { name: this.teamDef.leader.name, status: "pending" };
@@ -331,6 +340,7 @@ export class TeamCoordinator extends EventEmitter {
 			createGrepTool(cwd),
 			createFindTool(cwd),
 			createLsTool(cwd),
+			...this.mcpTools,
 		];
 	}
 
@@ -363,6 +373,31 @@ export class TeamCoordinator extends EventEmitter {
 		await this._completionPromise;
 	}
 
+	/** Connect configured MCP servers and expose their tools to every member. */
+	private async connectMcpServers(): Promise<void> {
+		const configs: McpServerConfig[] = this.config.mcpServers ?? [];
+		for (const cfg of configs) {
+			try {
+				const client = new McpClient(cfg);
+				const tools = await client.connect();
+				this.mcpClients.push(client);
+				for (const t of tools) {
+					this.mcpTools.push(mcpToolToAgentTool(client, t) as unknown as AgentTool<any>);
+				}
+				this.emit(
+					"message",
+					{ from: "mcp", to: "*", content: `MCP server "${cfg.name}" connected (${tools.length} tools)` },
+				);
+			} catch (e) {
+				this.emit(
+					"agent_error",
+					"mcp",
+					`MCP server "${cfg.name}" connect failed: ${e instanceof Error ? e.message : String(e)}`,
+				);
+			}
+		}
+	}
+
 	async stop(): Promise<void> {
 		if (!this.state) return;
 		// Allow agents to finish naturally before force-stopping.
@@ -392,6 +427,9 @@ export class TeamCoordinator extends EventEmitter {
 				if (h.mailbox?.clearFile) await h.mailbox.clearFile();
 			}),
 		);
+		// Close MCP server connections.
+		await Promise.allSettled(this.mcpClients.map((c) => c.close()));
+		this.mcpClients = [];
 	}
 
 	/** Merge results per worker: { name, branch, hash?, message?, error? }. */

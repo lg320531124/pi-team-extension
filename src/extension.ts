@@ -25,6 +25,7 @@ import { resolve } from "node:path";
 import { TeamCoordinator } from "./team/coordinator.js";
 import { parseTeamYaml } from "./team/schema.js";
 import { buildDefaultTeamDef } from "./team/default-team.js";
+import { loadMcpServers } from "./team/mcp.js";
 
 /** Resolve the session model + API key from pi's own registry. */
 async function resolveAuth(
@@ -246,6 +247,7 @@ export default function teamExtension(pi: ExtensionAPI): void {
 					apiKey: auth.apiKey,
 					defaultModel: `${auth.model.provider}/${auth.model.id}`,
 					cwd: ctx.cwd,
+					mcpServers: loadMcpServers(ctx.cwd),
 				},
 				makeModelResolver(ctx),
 			);
@@ -308,6 +310,7 @@ export default function teamExtension(pi: ExtensionAPI): void {
 							? params.model
 							: `${auth.model.provider}/${params.model ?? auth.model.id}`,
 					cwd: ctx.cwd,
+					mcpServers: loadMcpServers(ctx.cwd),
 				},
 				makeModelResolver(ctx),
 			);
