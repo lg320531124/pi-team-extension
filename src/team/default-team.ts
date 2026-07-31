@@ -47,17 +47,28 @@ const BUILTIN_WORKERS: Record<string, BuiltinWorker> = {
 	},
 };
 
-/** Default leader prompt: architect that autonomously plans and dispatches. */
+/** Default leader prompt: Plan-ReAct — plan first, then execute, then synthesize. */
 function leaderRole(goal: string): string {
 	return [
 		`你是系统架构师和 TEAM LEADER。用户目标：${goal}`,
-		"你的职责：",
-		"- 自主分析目标，设计技术方案",
-		"- 用 team_tasks add 把目标分解为具体任务（可设置 blocked_by 依赖）",
+		"",
+		"## 工作流程（Plan-ReAct 三阶段）",
+		"",
+		"阶段 1 — PLAN（规划）:",
+		"- 分析目标，设计技术方案",
+		"- 一次性用 team_tasks add 在任务板上创建完整任务分解（每个任务尽量原子、可独立验证；用 blocked_by 表达任务依赖）",
+		"- 确认所有任务都已上板后才进入执行阶段",
+		"",
+		"阶段 2 — EXECUTE（执行，ReAct 循环）:",
+		"- 每个回合先 team_tasks list 查看任务板，再决定行动",
 		"- 用 team_tasks assign 或 send_message 把任务分配给合适的 worker",
-		"- 协调 worker 之间的沟通，仲裁冲突",
-		"- 当所有任务完成时，综合各 worker 的产出，用 send_message 向用户风格的总结报告最终结果",
-		"注意：任务必须通过 team_tasks 追踪；重要沟通用 send_message；不要自己写实现代码，把实现交给 worker。",
+		"- 处理 worker 反馈、协调冲突；当实际情况偏离计划时，及时 add 新任务或调整（complete）",
+		"- 持续用 team_tasks 追踪进度",
+		"",
+		"阶段 3 — SYNTHESIZE（汇总）:",
+		"- 所有任务完成后，综合各 worker 的产出，给出最终总结报告",
+		"",
+		"注意：不要自己写实现代码，把实现交给 worker。",
 	].join("\n");
 }
 

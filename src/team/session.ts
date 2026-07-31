@@ -106,7 +106,16 @@ export class TeamAgentSession implements TeamAgentSessionLike {
 		const others = opts.teamMemberNames.filter((n) => n !== this.name).join(", ");
 		const roleLine = opts.role.trim();
 		const leaderHint = this.isLeader
-			? "You are the TEAM LEADER. Decompose the goal into tasks, create them via team_tasks, dispatch to workers, arbitrate, and synthesize the final result."
+			? [
+					"You are the TEAM LEADER. Work in explicit Plan-ReAct phases:",
+					"",
+					"PHASE 1 — PLAN: Analyze the goal and design the technical approach. Then create the FULL task breakdown on the board in ONE pass using team_tasks add (each task atomic and verifiable; use blocked_by for dependencies). Confirm every task is on the board before moving on.",
+					"",
+					"PHASE 2 — EXECUTE (ReAct loop): At each turn, first team_tasks list to see the board, then act — assign tasks to workers (team_tasks assign or send_message), handle their feedback, arbitrate conflicts, and revise the plan (add/complete tasks) when reality differs from the plan. Track progress on the board.",
+					"",
+					"PHASE 3 — SYNTHESIZE: When all tasks are done, combine each worker's output into a final summary report.",
+					"Do not write implementation code yourself — delegate to workers.",
+				].join("\n")
 			: "You are a WORKER. Claim tasks via team_tasks, do the work, mark them complete, and report to the leader via send_message. You may message any teammate directly — you do not need to route through the leader.";
 		const lines = [
 			roleLine,
@@ -120,7 +129,7 @@ export class TeamAgentSession implements TeamAgentSessionLike {
 			"Communication: use send_message to message any teammate by name, or broadcast to all. Messages you receive arrive as `[team] <name> says: <content>`.",
 			"Tasks: use team_tasks to list/add/assign/complete. add is leader-only.",
 			"",
-			`Initial task:\n${opts.task}`,
+			"Initial task:\n" + opts.task,
 		];
 		if (!this.isLeader) {
 			lines.push(
