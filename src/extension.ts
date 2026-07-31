@@ -26,6 +26,7 @@ import { TeamCoordinator } from "./team/coordinator.js";
 import { parseTeamYaml } from "./team/schema.js";
 import { buildDefaultTeamDef } from "./team/default-team.js";
 import { loadMcpServers, loadGlobalMcpServers, mergeMcpServers, McpClient, mcpToolToAgentTool } from "./team/mcp.js";
+import { loadOvConfig, ovRecall, ovCapture, ovSessionId } from "./memory/openviking.js";
 
 /** Active MCP clients per cwd (main-session injection). */
 const mcpClientsByCwd = new Map<string, McpClient[]>();
@@ -256,6 +257,34 @@ export default function teamExtension(pi: ExtensionAPI): void {
 		const all = [...mcpClientsByCwd.values()].flat();
 		mcpClientsByCwd.clear();
 		void Promise.allSettled(all.map((c) => c.close().catch(() => {})));
+	});
+
+	// OpenViking long-term memory: recall relevant memories before each turn,
+	// capture the turn afterwards. Both are best-effort with short timeouts —
+	// memory failures must never slow down or break the conversation.
+	const ovCfg = loadOvConfig();
+	pi.on("before_agent_start", async (event, ctx) => {
+		if (!ovCfg.enabled) return;
+		const memory = await ovRecall(ovCfg, (event.prompt ?? "").slice(0, 200));
+		if (!memory) return;
+		return {
+			message: {
+				customType: "ov-memory",
+				content: `[记忆召回] 根据当前问题从长期记忆检索到的相关内容：\n${memory}\n（仅作参考上下文，若与当前对话无关可忽略）`,
+				display: true,
+			},
+		};
+	});
+	pi.on("turn_end", (event, ctx) => {
+		if (!ovCfg.enabled) return;
+		// AgentMessage is a union; only some variants carry text content.
+		const content = (event.message as { content?: unknown }).content;
+		const text = Array.isArray(content)
+			? content.map((c) => (c.type === "text" ? c.text : "")).join(" ")
+			: typeof content === "string"
+				? content
+				: "";
+		void ovCapture(ovCfg, ovSessionId(ctx.cwd), text.slice(0, 2000), text.slice(0, 2000)).catch(() => {});
 	});
 
 	pi.registerCommand("team", {
