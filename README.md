@@ -81,7 +81,11 @@ await coordinator.start();
 
 ## MCP tool injection
 
-Team members can use MCP tools. Put a `.mcp.json` in the project root (standard MCP config: `mcpServers` with `command`/`args` for stdio servers, or `type: http`/`url`):
+**Main session:** when pi starts in a project with a `.mcp.json`, its MCP servers are connected and their tools are registered in the main session as `mcp_<server>_<tool>` (prefix avoids collisions). Tools appear immediately and work like built-in tools.
+
+**Team members:** team members also get the same MCP tools injected into their tool set, alongside the builtin and team tools.
+
+Standard MCP config (`mcpServers` with `command`/`args` for stdio servers, or `type: http`/`url`):
 
 ```json
 {
