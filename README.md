@@ -79,6 +79,20 @@ coordinator.on("team_done", () => console.log("team complete"));
 await coordinator.start();
 ```
 
+## Natural-language team startup (`start_team` tool)
+
+No YAML needed. Just tell pi to start an agent team — the main model calls the `start_team` tool automatically:
+
+```
+你用 pi: 开启 agent team，帮我把 README 重写一遍
+pi 主模型: → start_team(goal="重写 README")
+  → architect (leader) 自主分解任务 → coder/reviewer 干活
+  → 完成后 worker 的代码改动自动 merge 回主分支
+  → 返回成员产出 + 任务板 + merge 结果
+```
+
+Supported worker roles: `coder`, `reviewer`, `tester`, `writer`. Override via the tool's `workers` param or `model` param. The team runs blocking (like a long command); Ctrl+C interrupts and preserves worktrees with contributions.
+
 ## YAML definition
 
 ```yaml

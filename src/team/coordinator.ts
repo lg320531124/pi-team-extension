@@ -30,6 +30,7 @@ import { createSendMessageTool } from "./tools/send-message.js";
 import { createTeamTasksTool } from "./tools/team-tasks.js";
 import type {
 	AgentHandle,
+	AgentStatus,
 	TeamConfig,
 	TeamDefinition,
 	TeamState,
@@ -402,6 +403,26 @@ export class TeamCoordinator extends EventEmitter {
 		error?: string;
 	}[] {
 		return [...this.mergeResults.entries()].map(([name, r]) => ({ name, ...r }));
+	}
+
+	/**
+	 * Per-member final output summaries (last assistant message, truncated),
+	 * plus status. Used by the start_team tool to report what the team did.
+	 */
+	getMemberSummaries(): {
+		name: string;
+		isLeader: boolean;
+		status: AgentStatus;
+		summary: string;
+	}[] {
+		if (!this.state) return [];
+		const handles = [this.state.leader, ...this.state.workers.values()];
+		return handles.map((h) => ({
+			name: h.name,
+			isLeader: h.name === this.state!.leader.name,
+			status: h.status,
+			summary: h.session?.getFinalSummary?.() ?? "(no summary)",
+		}));
 	}
 
 	async stopAgent(name: string): Promise<void> {

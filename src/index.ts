@@ -16,6 +16,8 @@ export type { MessageBusEvents } from "./team/message-bus.js";
 export { Mailbox } from "./team/mailbox.js";
 export type { MailboxOptions } from "./team/mailbox.js";
 export { parseTeamYaml, TeamSchemaError } from "./team/schema.js";
+export { buildDefaultTeamDef, BUILTIN_WORKER_NAMES } from "./team/default-team.js";
+export type { DefaultTeamOptions } from "./team/default-team.js";
 export { createSendMessageTool } from "./team/tools/send-message.js";
 export { createBroadcastTool } from "./team/tools/broadcast.js";
 export { createTeamTasksTool } from "./team/tools/team-tasks.js";

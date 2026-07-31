@@ -96,6 +96,8 @@ export interface TeamAgentSessionLike {
 	readonly isLeader: boolean;
 	start(): Promise<void>;
 	stop(): Promise<void>;
+	/** Final output summary (last assistant message, truncated). */
+	getFinalSummary?(): string;
 }
 
 export interface MailboxLike {

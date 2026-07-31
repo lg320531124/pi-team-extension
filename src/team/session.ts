@@ -178,4 +178,22 @@ export class TeamAgentSession implements TeamAgentSessionLike {
 	isDone(): boolean {
 		return this.done;
 	}
+
+	/**
+	 * Final output summary: the last assistant text message (truncated),
+	 * falling back to the run error, then "(no output)".
+	 */
+	getFinalSummary(): string {
+		const messages = this.agent.state.messages;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const msg = messages[i];
+			if (msg.role !== "assistant") continue;
+			const text = (msg.content ?? [])
+				.map((c) => (c.type === "text" ? c.text : ""))
+				.join(" ")
+				.trim();
+			if (text.length > 0) return text.length > 500 ? `${text.slice(0, 500)}…` : text;
+		}
+		return this.agent.state.errorMessage ?? "(no output)";
+	}
 }

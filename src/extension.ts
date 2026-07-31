@@ -1,9 +1,10 @@
 /**
  * pi extension entry point.
  *
- * Register the `/team` command inside pi so users can run:
- *   pi install lg320531124/pi-team-extension
- *   /team run demo.yml
+ * Registers:
+ *  - `/team run <file.yml>` command — explicit, YAML-defined teams
+ *  - `start_team` tool — natural-language team startup (the main pi model
+ *    calls it when the user asks to "start an agent team")
  *
  * Discovery: package.json declares `"pi": { "extensions": ["./src/extension.ts"] }`.
  * pi's loader (core/extensions/loader.ts:readPiManifest) reads this field and
@@ -15,12 +16,182 @@
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
+	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
+import { Type, type Static } from "typebox";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { TeamCoordinator } from "./team/coordinator.js";
 import { parseTeamYaml } from "./team/schema.js";
+import { buildDefaultTeamDef } from "./team/default-team.js";
+
+/** Resolve the session model + API key from pi's own registry. */
+async function resolveAuth(
+	ctx: ExtensionContext,
+): Promise<{ ok: true; model: Model<any>; apiKey: string } | { ok: false; error: string }> {
+	const model = ctx.model;
+	if (!model) {
+		return { ok: false, error: "No model selected. Use /model to pick one first." };
+	}
+	try {
+		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+		if (auth.ok) return { ok: true, model, apiKey: auth.apiKey ?? "" };
+		return {
+			ok: false,
+			error: `No API key for provider "${model.provider}": ${auth.error ?? "unknown"}`,
+		};
+	} catch (e) {
+		return {
+			ok: false,
+			error: `Auth resolution failed: ${e instanceof Error ? e.message : String(e)}`,
+		};
+	}
+}
+
+/** modelResolver: split "provider/id"; bare ids prefer the session provider. */
+function makeModelResolver(ctx: ExtensionContext): (id: string) => Model<any> | undefined {
+	return (id: string) => {
+		const slashIdx = id.indexOf("/");
+		if (slashIdx >= 0) {
+			const provider = id.slice(0, slashIdx);
+			const modelId = id.slice(slashIdx + 1);
+			return ctx.modelRegistry.find(provider, modelId);
+		}
+		// Bare id: prefer the current session's provider (same id may exist under
+		// multiple providers, e.g. "deepseek-v4-flash" under opencode-go and deepseek).
+		const currentProvider = ctx.model?.provider;
+		if (currentProvider) {
+			const same = ctx.modelRegistry.find(currentProvider, id);
+			if (same) return same;
+		}
+		for (const m of ctx.modelRegistry.getAll()) {
+			if (m.id === id) return m;
+		}
+		return undefined;
+	};
+}
+
+function toolOk(text: string) {
+	return { content: [{ type: "text", text } as const], details: { ok: true } };
+}
+
+const startTeamSchema = Type.Object({
+	goal: Type.String({
+		description: "团队要自主完成的目标（尽量具体，包含范围和要求）",
+	}),
+	workers: Type.Optional(
+		Type.Array(Type.String(), {
+			description:
+				'worker 角色列表，默认 ["coder","reviewer"]；可选 coder / reviewer / tester / writer',
+		}),
+	),
+	model: Type.Optional(
+		Type.String({
+			description: "模型 ID（可选，默认使用当前会话模型，例如 'deepseek-v4-flash'）",
+		}),
+	),
+});
+
+function toolError(error: string) {
+	return {
+		content: [{ type: "text", text: `❌ ${error}` } as const],
+		details: { ok: false, error },
+	};
+}
+
+/** Run a coordinator to completion, wiring UI events + abort handling. */
+async function runTeam(
+	coordinator: TeamCoordinator,
+	teamName: string,
+	ctx: ExtensionContext,
+	signal?: AbortSignal,
+): Promise<string> {
+	// safeNotify/safeStatus swallow stale-ctx errors — events may fire after
+	// the invoking turn ends (print mode, session replacement).
+	const safeNotify = (type: "info" | "warning" | "error", msg: string) => {
+		try { ctx.ui.notify(msg, type); } catch { /* ctx may be stale */ }
+	};
+	const safeStatus = (text: string | undefined) => {
+		try { ctx.ui.setStatus("team", text); } catch { /* ctx may be stale */ }
+	};
+
+	coordinator.on("message", (m) => {
+		safeNotify("info", `[${m.from} → ${m.to}] ${m.content.slice(0, 120)}`);
+	});
+	coordinator.on("agent_done", (name) => {
+		safeNotify("info", `✓ ${name} done`);
+		const live = coordinator
+			.getMemberSummaries()
+			.map((m) => `${m.name}:${m.status}`)
+			.join(", ");
+		safeStatus(`team ${live}`);
+	});
+	coordinator.on("agent_error", (name, err) => {
+		safeNotify("error", `✗ ${name}: ${err}`);
+	});
+	coordinator.on("team_done", () => {
+		safeNotify("info", "team complete");
+	});
+
+	safeNotify("info", `Starting team "${teamName}"…`);
+	safeStatus(`team "${teamName}" starting…`);
+
+	const onAbort = () => {
+		void coordinator.stop();
+	};
+	signal?.addEventListener("abort", onAbort, { once: true });
+	try {
+		await coordinator.start();
+		await coordinator.waitForCompletion();
+	} catch (e) {
+		throw e;
+	} finally {
+		signal?.removeEventListener("abort", onAbort);
+		safeStatus(undefined);
+	}
+	if (signal?.aborted) {
+		return "⛔ 团队运行被中断。worktree 已按贡献状态处理：有提交的分支保留待 merge，干净的分支已清理。";
+	}
+	return formatTeamResult(coordinator);
+}
+
+/** Human-readable team result: member outputs, merges, task board. */
+function formatTeamResult(coordinator: TeamCoordinator): string {
+	const state = coordinator.getState();
+	const members = coordinator.getMemberSummaries();
+	const merges = coordinator.getResults();
+	const lines: string[] = [];
+	lines.push(`团队 "${state?.name ?? "?"}" 运行完成。`);
+	if (members.length > 0) {
+		lines.push("", "成员产出：");
+		for (const m of members) {
+			const role = m.isLeader ? "leader" : "worker";
+			const preview = m.summary.length > 160 ? `${m.summary.slice(0, 160)}…` : m.summary;
+			lines.push(`- ${m.name} (${role}, ${m.status}): ${preview}`);
+		}
+	}
+	if (merges.length > 0) {
+		lines.push("", "代码归集（已 merge 回主分支）：");
+		for (const r of merges) {
+			if (r.error) {
+				lines.push(`- ${r.name}: merge 失败 — ${r.error}`);
+			} else {
+				lines.push(`- ${r.name}: commit ${r.hash?.slice(0, 8)} — ${r.message ?? ""}`);
+			}
+		}
+	}
+	const tasks = state?.tasks ?? [];
+	if (tasks.length > 0) {
+		lines.push("", "任务板终态：");
+		for (const t of tasks) {
+			lines.push(
+				`- ${t.id} [${t.status}]${t.assignedTo ? ` @${t.assignedTo}` : ""}: ${t.title}`,
+			);
+		}
+	}
+	return lines.join("\n");
+}
 
 export default function teamExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("team", {
@@ -61,91 +232,86 @@ export default function teamExtension(pi: ExtensionAPI): void {
 				return;
 			}
 
-			// Resolve the default model + API key from pi's own registry so the
-			// extension reuses whatever the user has configured (env, /login, etc.).
-			const defaultModel = ctx.model;
-			if (!defaultModel) {
-				ctx.ui.notify(
-					"No model selected. Use /model to pick one before /team run.",
-					"error",
-				);
+			const auth = await resolveAuth(ctx);
+			if (!auth.ok) {
+				ctx.ui.notify(auth.error, "error");
 				return;
 			}
-
-			let apiKey = "";
-			try {
-				const auth = await ctx.modelRegistry.getApiKeyAndHeaders(defaultModel);
-				if (auth.ok) {
-					apiKey = auth.apiKey ?? "";
-				} else {
-					ctx.ui.notify(
-						`No API key for provider "${defaultModel.provider}": ${auth.error ?? "unknown"}`,
-						"error",
-					);
-					return;
-				}
-			} catch (e) {
-				ctx.ui.notify(
-					`Auth resolution failed: ${e instanceof Error ? e.message : String(e)}`,
-					"error",
-				);
-				return;
-			}
-
-			// modelResolver: split "provider/id" or fall back to the session model.
-			const modelResolver = (id: string): Model<any> | undefined => {
-				const slashIdx = id.indexOf("/");
-				if (slashIdx >= 0) {
-					const provider = id.slice(0, slashIdx);
-					const modelId = id.slice(slashIdx + 1);
-					return ctx.modelRegistry.find(provider, modelId);
-				}
-				// No provider prefix → best-effort search across providers.
-				for (const m of ctx.modelRegistry.getAll()) {
-					if (m.id === id) return m;
-				}
-				return undefined;
-			};
 
 			const coordinator = new TeamCoordinator(
 				teamDef,
 				{
-					apiKey,
-					defaultModel: defaultModel.id,
+					apiKey: auth.apiKey,
+					defaultModel: `${auth.model.provider}/${auth.model.id}`,
 					cwd: ctx.cwd,
 				},
-				modelResolver,
+				makeModelResolver(ctx),
 			);
 
-			// safeNotify swallows stale-ctx errors gracefully — agent completion
-			// events may fire after the command handler returns (print mode,
-			// session replacement) when ctx is no longer valid.
-			const safeNotify = (type: "info" | "warning" | "error", msg: string) => {
-				try { ctx.ui.notify(msg, type); } catch { /* ctx may be stale */ }
-			};
-			coordinator.on("message", (m) => {
-				safeNotify("info", `[${m.from} → ${m.to}] ${m.content.slice(0, 120)}`);
-			});
-			coordinator.on("agent_done", (name) => {
-				safeNotify("info", `✓ ${name} done`);
-			});
-			coordinator.on("agent_error", (name, err) => {
-				safeNotify("error", `✗ ${name}: ${err}`);
-			});
-			coordinator.on("team_done", () => {
-				safeNotify("info", "team complete");
-			});
+			await runTeam(coordinator, teamDef.name, ctx);
+		},
+	});
 
-			ctx.ui.notify(`Starting team "${teamDef.name}"…`, "info");
-			try {
-				await coordinator.start();
-			} catch (e) {
-				ctx.ui.notify(
-					`Team failed: ${e instanceof Error ? e.message : String(e)}`,
-					"error",
-				);
-				await coordinator.stop();
+	pi.registerTool({
+		name: "start_team",
+		label: "Start Agent Team",
+		description:
+			"启动一个 agent 团队（architect 领导 + 若干 worker）自主完成一个目标。适合多步骤、多文件、需要独立验证的任务。" +
+			"leader 会自动分解目标为任务、分配给 worker、协调并汇总。团队运行期间会阻塞等待（类似长命令）；完成后 worker 的代码改动自动 merge 回主分支。" +
+			"目标描述得越具体越好，例如：'为项目添加用户登录功能，包括前后端'。",
+		parameters: Type.Object({
+			goal: Type.String({
+				description: "团队要自主完成的目标（尽量具体，包含范围和要求）",
+			}),
+			workers: Type.Optional(
+				Type.Array(
+					Type.String(),
+					{
+						description:
+							'worker 角色列表，默认 ["coder","reviewer"]；可选 coder / reviewer / tester / writer',
+					},
+				),
+			),
+			model: Type.Optional(
+				Type.String({
+					description: "模型 ID（可选，默认使用当前会话模型，例如 'deepseek-v4-flash'）",
+				}),
+			),
+		}),
+		async execute(
+			_toolCallId: string,
+			params: Static<typeof startTeamSchema>,
+			signal: AbortSignal | undefined,
+			_onUpdate: unknown,
+			ctx: ExtensionContext,
+		) {
+			const auth = await resolveAuth(ctx);
+			if (!auth.ok) return toolError(auth.error);
+
+			const teamDef = buildDefaultTeamDef({
+				goal: params.goal,
+				workers: params.workers,
+				model: params.model,
+			});
+			if (Object.keys(teamDef.workers).length === 0) {
+				return toolError("未识别的 worker 角色。支持: coder, reviewer, tester, writer。");
 			}
+
+			const coordinator = new TeamCoordinator(
+				teamDef,
+				{
+					apiKey: auth.apiKey,
+					defaultModel:
+						params.model && params.model.includes("/")
+							? params.model
+							: `${auth.model.provider}/${params.model ?? auth.model.id}`,
+					cwd: ctx.cwd,
+				},
+				makeModelResolver(ctx),
+			);
+
+			const result = await runTeam(coordinator, teamDef.name, ctx, signal);
+			return toolOk(result);
 		},
 	});
 }
