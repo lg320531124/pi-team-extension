@@ -149,6 +149,8 @@ async function runTeam(
 	} finally {
 		signal?.removeEventListener("abort", onAbort);
 		safeStatus(undefined);
+		// Always tear down agent timers + leftover worktrees so the process can exit.
+		await coordinator.stop().catch(() => {});
 	}
 	if (signal?.aborted) {
 		return "⛔ 团队运行被中断。worktree 已按贡献状态处理：有提交的分支保留待 merge，干净的分支已清理。";
