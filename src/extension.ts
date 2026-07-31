@@ -117,17 +117,23 @@ export default function teamExtension(pi: ExtensionAPI): void {
 				modelResolver,
 			);
 
+			// safeNotify swallows stale-ctx errors gracefully — agent completion
+			// events may fire after the command handler returns (print mode,
+			// session replacement) when ctx is no longer valid.
+			const safeNotify = (type: "info" | "warning" | "error", msg: string) => {
+				try { ctx.ui.notify(msg, type); } catch { /* ctx may be stale */ }
+			};
 			coordinator.on("message", (m) => {
-				ctx.ui.notify(`[${m.from} → ${m.to}] ${m.content.slice(0, 120)}`, "info");
+				safeNotify("info", `[${m.from} → ${m.to}] ${m.content.slice(0, 120)}`);
 			});
 			coordinator.on("agent_done", (name) => {
-				ctx.ui.notify(`✓ ${name} done`, "info");
+				safeNotify("info", `✓ ${name} done`);
 			});
 			coordinator.on("agent_error", (name, err) => {
-				ctx.ui.notify(`✗ ${name}: ${err}`, "error");
+				safeNotify("error", `✗ ${name}: ${err}`);
 			});
 			coordinator.on("team_done", () => {
-				ctx.ui.notify("team complete", "info");
+				safeNotify("info", "team complete");
 			});
 
 			ctx.ui.notify(`Starting team "${teamDef.name}"…`, "info");
