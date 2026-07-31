@@ -37,7 +37,7 @@ const mcpClientsByCwd = new Map<string, McpClient[]>();
  */
 async function registerMainSessionMcpTools(pi: ExtensionAPI, cwd: string): Promise<void> {
 	if (mcpClientsByCwd.has(cwd)) return; // already registered for this cwd
-	const servers = loadMcpServers(cwd);
+	const servers = mergeMcpServers(loadMcpServers(cwd), loadGlobalMcpServers());
 	if (servers.length === 0) return;
 
 	const clients: McpClient[] = [];
