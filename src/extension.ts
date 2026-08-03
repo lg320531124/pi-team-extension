@@ -275,7 +275,15 @@ export default function teamExtension(pi: ExtensionAPI): void {
 		return {
 			message: {
 				customType: "ov-memory",
-				content: `[记忆召回] 根据当前问题从长期记忆检索到的相关内容：\n${memory}\n（仅作参考上下文，若与当前对话无关可忽略）`,
+				// NOTE: pi places this message AFTER the user's prompt in the
+				// conversation (see agent-session.js emitBeforeAgentStart usage).
+				// It must be framed as non-actionable reference context, otherwise
+				// the model may treat it as a follow-up user input and reply to it
+				// instead of answering the actual question.
+				content:
+					"[长期记忆] 以下是从历史会话检索到的参考记忆（按相关性排序，可能含噪声）。" +
+					"它不是用户的新输入，无需回应它；仅当与当前问题直接相关时作为背景参考：\n" +
+					memory,
 				display: true,
 			},
 		};

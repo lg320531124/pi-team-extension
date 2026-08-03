@@ -18,15 +18,45 @@ export interface OvConfig {
 	url: string;
 	apiKey: string;
 	enabled: boolean;
+	/** Minimum relevance score for recalled memories (0–1). */
+	scoreThreshold: number;
+	/** Max number of memory items recalled per turn. */
+	recallLimit: number;
+	/** Max characters per recalled memory preview. */
+	maxContentChars: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 3000;
 
+/** Recall is skipped for this long after a failed OpenViking request (circuit breaker). */
+const CIRCUIT_BREAKER_MS = 30_000;
+
+/** Timestamp of the last failed recall; 0 = healthy. */
+let recallFailureAt = 0;
+
+function recallCircuitOpen(): boolean {
+	return recallFailureAt !== 0 && Date.now() - recallFailureAt < CIRCUIT_BREAKER_MS;
+}
+
+function clamp01(n: number): number {
+	return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0.4;
+}
+
+function toIntEnv(raw: string | undefined, fallback: number, min: number, max: number): number {
+	if (raw === undefined) return fallback;
+	const n = Number(raw);
+	if (!Number.isFinite(n)) return fallback;
+	return Math.min(max, Math.max(min, Math.round(n)));
+}
+
 /** Resolve OpenViking connection config (env first, then ovcli.conf). */
 export function loadOvConfig(): OvConfig {
 	const enabledRaw = process.env.OPENVIKING_MEMORY_ENABLED;
+	const scoreThreshold = clamp01(Number(process.env.OPENVIKING_SCORE_THRESHOLD ?? "0.4"));
+	const recallLimit = toIntEnv(process.env.OPENVIKING_RECALL_LIMIT, 3, 1, 10);
+	const maxContentChars = toIntEnv(process.env.OPENVIKING_RECALL_MAX_CONTENT_CHARS, 300, 0, 2000);
 	if (enabledRaw !== undefined && ["0", "false", "no"].includes(enabledRaw.toLowerCase())) {
-		return { url: "", apiKey: "", enabled: false };
+		return { url: "", apiKey: "", enabled: false, scoreThreshold, recallLimit, maxContentChars };
 	}
 
 	let url = process.env.OPENVIKING_URL ?? process.env.OPENVIKING_BASE_URL ?? "";
@@ -53,7 +83,7 @@ export function loadOvConfig(): OvConfig {
 		}
 	}
 
-	return { url: url.replace(/\/+$/, ""), apiKey, enabled: url.length > 0 };
+	return { url: url.replace(/\/+$/, ""), apiKey, enabled: url.length > 0, scoreThreshold, recallLimit, maxContentChars };
 }
 
 async function ovFetch(
@@ -100,22 +130,33 @@ async function ovFetch(
 export async function ovRecall(
 	cfg: OvConfig,
 	query: string,
-	limit = 5,
+	limit?: number,
 ): Promise<string> {
 	const trimmed = query.trim();
 	if (!trimmed || trimmed.length < 5) return "";
+	if (recallCircuitOpen()) return ""; // server recently failed — don't stall the turn
 
+	const recallLimit = limit ?? cfg.recallLimit;
 	const res = await ovFetch(cfg, "/api/v1/search/find", {
 		method: "POST",
-		body: JSON.stringify({ query: trimmed, target_uri: "viking://user", limit, score_threshold: 0 }),
+		body: JSON.stringify({
+			query: trimmed,
+			target_uri: "viking://user",
+			limit: recallLimit,
+			score_threshold: cfg.scoreThreshold,
+		}),
 	}, 4000);
-	if (!res.ok || !Array.isArray(res.result)) return "";
+	if (!res.ok || !Array.isArray(res.result)) {
+		recallFailureAt = Date.now();
+		return "";
+	}
+	recallFailureAt = 0;
 
 	const items = res.result as Array<{ uri?: string; abstract?: string; overview?: string }>;
 	const blocks: string[] = [];
-	for (const item of items.slice(0, limit)) {
+	for (const item of items.slice(0, recallLimit)) {
 		const preview = (item.abstract ?? item.overview ?? "").trim();
-		if (preview.length > 0) blocks.push(`- ${preview.slice(0, 800)}`);
+		if (preview.length > 0) blocks.push(`- ${preview.slice(0, cfg.maxContentChars)}`);
 	}
 	return blocks.length > 0 ? blocks.join("\n") : "";
 }
