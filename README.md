@@ -13,6 +13,7 @@ pi ships a single-agent ReAct loop. This package adds:
 - **`broadcast`** — message all teammates at once
 - **`team_tasks`** — shared task board with dependencies (`blocked_by`); leader adds, workers claim/complete
 - **Git worktree isolation** — each worker writes in its own worktree under `.pi/worktrees/`, zero file conflicts
+- **OpenViking long-term memory** — recall relevant past memories before each turn and capture the turn into a stable per-project session (config-driven, non-derailing)
 - **Contribution merge-back** — workers commit their changes; the leader merges each worker's branch back into main (serialized, `--no-ff`), or preserves the branch on conflict
 - **Mailbox → steering bridge** — incoming messages land in pi's native `agent.steer()` queue, consumed on the next turn
 - **Auto error notification** — a worker whose turn fails notifies the leader (mirrors CC agent-teams v2.1.198+)
@@ -95,7 +96,32 @@ Standard MCP config (`mcpServers` with `command`/`args` for stdio servers, or `t
 }
 ```
 
-When a team starts, each MCP server is connected (stdio via subprocess, HTTP via fetch) and its tools are injected into every member's tool set alongside the builtin and team tools. Servers are closed when the team stops. This works because the extension ships its own minimal MCP client — pi itself has no native MCP support.
+When a team starts, each MCP server is connected (stdio via subprocess, HTTP via fetch — 8s connect cap per server) and its tools are injected into every member's tool set alongside the builtin and team tools. Servers are closed when the team stops. This works because the extension ships its own minimal MCP client — pi itself has no native MCP support.
+
+Beyond the project's `.mcp.json`, the main session also merges any servers declared in your **global Claude Code config** (so project-local and global servers both show up). Each tool is registered as `mcp_<server>_<tool>` to avoid collisions across servers.
+
+> **Note:** MCP injection is best-effort — a server that fails to connect or times out is logged and skipped, never blocking session or team startup.
+
+## OpenViking long-term memory
+
+OpenViking ("Context Database for AI Agents") provides long-term semantic memory via a local REST server. This extension wires pi into it so the main agent can **recall** relevant past memories before each turn and **capture** the turn to a stable per-project session afterwards — the same capability Claude Code gets through its hooks plugin.
+
+Configuration (env vars win over `~/.openviking/ovcli.conf`):
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `OPENVIKING_URL` / `OPENVIKING_BASE_URL` | from `ovcli.conf` | OpenViking server base URL (e.g. `http://127.0.0.1:1933`) |
+| `OPENVIKING_API_KEY` / `OPENVIKING_BEARER_TOKEN` | from `ovcli.conf` | API key (`Authorization: Bearer`) |
+| `OPENVIKING_MEMORY_ENABLED` | enabled when URL resolved | set `0`/`false`/`no` to disable |
+| `OPENVIKING_SCORE_THRESHOLD` | `0.4` | min relevance score for recalled memories (0–1) |
+| `OPENVIKING_RECALL_LIMIT` | `3` | max memory items recalled per turn (1–10) |
+| `OPENVIKING_RECALL_MAX_CONTENT_CHARS` | `300` | max chars per recalled memory preview (0–2000) |
+| `OPENVIKING_CLI_CONFIG_FILE` / `OPENVIKING_CONFIG_FILE` | `~/.openviking/ovcli.conf` | alternate config file path |
+
+Behavior:
+- **Recall** runs on `before_agent_start`, searching relevant memories for the current prompt. Recalled memory is injected as non-actionable reference context (a `[长期记忆]` block) so the model uses it as background — it is explicitly prevented from being treated as a new user input.
+- **Capture** runs on `turn_end`, appending the user + assistant text to a stable per-project session (`pi-<cwdHash>`) and committing it.
+- Memory is **best-effort** — short timeouts (3–4s) and a 30s circuit breaker after a failed request ensure a memory outage never stalls or breaks a conversation.
 
 ## Natural-language team startup (`start_team` tool)
 
