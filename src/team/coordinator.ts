@@ -382,7 +382,19 @@ export class TeamCoordinator extends EventEmitter {
 				const tools = await client.connect();
 				this.mcpClients.push(client);
 				for (const t of tools) {
-					this.mcpTools.push(mcpToolToAgentTool(client, t) as unknown as AgentTool<any>);
+					// MCP tool names are NOT namespaced across servers — different
+					// servers can expose the same name (e.g. drawio and
+					// chrome-devtools both have "list_pages"). Sending duplicate
+					// tool names makes the upstream reject the request with
+					// "Tool names must be unique." (400). Prefix like the
+					// main-session injection does in extension.ts.
+					const prefixed = `mcp_${cfg.name}_${t.name}`;
+					const tool = mcpToolToAgentTool(client, t) as unknown as AgentTool<any>;
+					this.mcpTools.push({
+						...tool,
+						name: prefixed,
+						label: `MCP: ${cfg.name}/${t.name}`,
+					});
 				}
 				this.emit(
 					"message",
