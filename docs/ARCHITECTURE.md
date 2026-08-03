@@ -20,6 +20,8 @@
 >   - [[#3.4 Mailbox — 每成员邮箱队列]]
 >   - [[#3.5 GitWorktree — 文件隔离]]
 >   - [[#3.6 schema.ts — YAML 解析与校验]]
+>   - [[#3.7 MCP 工具注入]]
+>   - [[#3.8 OpenViking 长期记忆]]
 > - [[#四、集成方式]]
 >   - [[#4.1 pi Extension 模式（推荐）]]
 >   - [[#4.2 独立 CLI 模式]]
@@ -162,6 +164,9 @@ Worker 调 send_message(to="reviewer", content="PR 看完了")
 | `src/team/tools/send-message.ts` | -- | `send_message` AgentTool 实现 |
 | `src/team/tools/broadcast.ts` | -- | `broadcast` AgentTool 实现 |
 | `src/team/tools/team-tasks.ts` | -- | `team_tasks` AgentTool 实现（Leader 加任务/Worker 认领完成） |
+| `src/team/mcp.ts` | -- | 轻量 MCP client + 工具注入：连接 stdio/HTTP 服务器，`mcp_<server>_<tool>` 前缀，`loadMcpServers` / `loadGlobalMcpServers` / `mergeMcpServers` / `McpClient` |
+| `src/team/default-team.ts` | -- | `start_team` 工具的默认团队构造（按角色的默认 worker 拆分） |
+| `src/memory/openviking.ts` | 163 | OpenViking 长期记忆：`ovRecall`（召回）/ `ovCapture`（捕获）/ `loadOvConfig` / `ovHealthy` / 熔断器 |
 
 [[#目录|↑ 返回目录]]
 
@@ -361,6 +366,41 @@ git branch -D {branch}               # 再删分支
 - `role` 必填，`task` 可选
 - `thinkingLevel` 只能从 `["minimal","low","medium","high","xhigh","max"]` 中选
 - Worker 的 `task` 有默认值：`"Wait for the leader to assign work via send_message or team_tasks."`
+
+[[#目录|↑ 返回目录]]
+
+---
+
+### 3.7 MCP 工具注入
+
+`src/team/mcp.ts` + `src/extension.ts:registerMainSessionMcpTools`
+
+pi 本身没有原生 MCP 支持，扩展自带一个极简 MCP client 来补上这个能力，并把 MCP 工具注入到主会话和每个团队成员的工具集中。
+
+**服务器来源**：项目 `.mcp.json` 的 `mcpServers` + 全局 Claude Code config 里的服务器。`loadGlobalMcpServers()` 读取全局配置，`mergeMcpServers()` 把两者合并去重。
+
+**连接与注入**：stdio 服务器用子进程启动，HTTP 用 `fetch`；每台服务器连接有 8s 上限。工具以 `mcp_<server>_<tool>` 命名注册，避免不同服务器间的工具名冲突。
+
+**最佳努力**：`registerMainSessionMcpTools` 在 `session_start` 时阻塞等待（确保首轮前工具已注册），但某台服务器连接失败会被 `log + 跳过`，绝不停会话或团队启动。
+
+### 3.8 OpenViking 长期记忆
+
+`src/memory/openviking.ts` + `src/extension.ts`
+
+OpenViking（"Context Database for AI Agents"）提供长期语义记忆（本地 REST 服务器，默认 `http://127.0.0.1:1933`）。本模块给 pi 与 Claude Code hooks 插件相同的能力。
+
+```
+before_agent_start → ovRecall(query) →  [长期记忆] 注入（非可执行参考上下文）
+turn_end          → ovCapture(sessionId, user, assistant) → 写 session + commit
+每 3–4s 超时        → 失败后 30s 融合器（circuit breaker）→ 记忆故障绝不阻塞会话
+```
+
+**配置**：环境变量优先于 `~/.openviking/ovcli.conf`（详见 README「OpenViking long-term memory」）。`OPENVIKING_MEMORY_ENABLED=0` 可关闭；关闭后召回/捕获均跳过。
+
+**关键设计**：
+- 召回的记忆注入为 `[长期记忆]` 文本块，显式标注为非可执行参考上下文（不是新用户输入），避免模型把它当后续用户输入而偏离当前问题。
+- session id 稳定按项目目录哈希（`pi-<cwdHash>`），让记忆跨会话累积在同一 session 里。
+- 所有请求短超时 + 熔断，记忆是 best-effort，绝不拖慢或破坏对话。
 
 [[#目录|↑ 返回目录]]
 
