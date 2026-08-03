@@ -31,6 +31,9 @@ import { loadOvConfig, ovRecall, ovCapture, ovSessionId } from "./memory/openvik
 /** Active MCP clients per cwd (main-session injection). */
 const mcpClientsByCwd = new Map<string, McpClient[]>();
 
+/** Number of teams currently running (footer display). */
+let activeTeams = 0;
+
 /**
  * Register MCP tools from the project's .mcp.json into the main session.
  * Called on session_start so cwd is known; tools get an `mcp_<server>_<tool>`
@@ -175,7 +178,7 @@ async function runTeam(
 			.getMemberSummaries()
 			.map((m) => `${m.name}:${m.status}`)
 			.join(", ");
-		safeStatus(`team ${live}`);
+		safeStatus(`teams×${activeTeams} ▶ ${live}`);
 	});
 	coordinator.on("agent_error", (name, err) => {
 		safeNotify("error", `✗ ${name}: ${err}`);
@@ -184,8 +187,9 @@ async function runTeam(
 		safeNotify("info", "team complete");
 	});
 
+	activeTeams += 1;
 	safeNotify("info", `Starting team "${teamName}"…`);
-	safeStatus(`team "${teamName}" starting…`);
+	safeStatus(`teams×${activeTeams} ▶ ${teamName} starting…`);
 
 	const onAbort = () => {
 		void coordinator.stop();
@@ -198,6 +202,7 @@ async function runTeam(
 		throw e;
 	} finally {
 		signal?.removeEventListener("abort", onAbort);
+		activeTeams = Math.max(0, activeTeams - 1);
 		safeStatus(undefined);
 		// Always tear down agent timers + leftover worktrees so the process can exit.
 		await coordinator.stop().catch(() => {});
