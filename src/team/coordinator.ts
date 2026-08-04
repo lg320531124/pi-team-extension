@@ -80,6 +80,7 @@ export class TeamCoordinator extends EventEmitter {
 			mailboxCapacity: config.mailboxCapacity ?? 10,
 			maxMessagesPerAgent: config.maxMessagesPerAgent ?? 200,
 			pollIntervalMs: config.pollIntervalMs ?? 500,
+			maxLeaderWakeups: config.maxLeaderWakeups ?? 3,
 			mcpServers: config.mcpServers ?? [],
 		};
 		this.modelResolver = modelResolver;
@@ -220,11 +221,65 @@ export class TeamCoordinator extends EventEmitter {
 		// after all contribution merges have been serialized back to main.
 		const all = [this.runAgent(this.teamDef.leader.name, leaderSession), ...workerRuns];
 		this._completionPromise = Promise.allSettled(all).then(async () => {
+			// Agents may end their loops with tasks still pending (leader planned
+			// but never dispatched). Nudge them back up to maxLeaderWakeups times
+			// so "team done" means the board is actually complete.
+			await this.driveToCompletion();
 			await this.mergeChain;
 			this.emit("team_done");
 		});
 
 		return this.state;
+	}
+
+	/**
+	 * Completion check: if the task board has unfinished tasks after every
+	 * member's ReAct loop has ended, wake the leader (and any finished worker
+	 * that may hold queued assignments) back into their loops, bounded by
+	 * maxLeaderWakeups. Prevents the hollow "team done" where the leader
+	 * planned tasks but never dispatched them.
+	 */
+	private async driveToCompletion(): Promise<void> {
+		const maxWakeups = this.config.maxLeaderWakeups;
+		for (let attempt = 0; attempt < maxWakeups; attempt++) {
+			const tasks = this.state?.tasks ?? [];
+			const pending = tasks.filter((t) => t.status !== "done");
+			if (tasks.length > 0 && pending.length === 0) break; // genuinely complete
+			if (tasks.length === 0 && attempt > 0) break; // leader chose not to plan
+			const leader = this.state?.leader;
+			if (!leader?.session) break;
+
+			const pendingDesc =
+				tasks.length === 0
+					? "任务板还是空的（尚未创建任何任务）"
+					: pending.map((t) => `${t.id}(${t.title.slice(0, 30)})`).join("、");
+			const nudge =
+				`[协调器] 团队即将结束，但${pendingDesc}尚未完成。` +
+				`请继续工作：${tasks.length === 0 ? "先把目标分解为任务上板" : "给 worker 派活并跟进进度"}；` +
+				`全部任务完成后用 team_tasks complete 标记。若某任务确实无法完成，也请标记完成并写明原因。`;
+
+			try {
+				await leader.session.wake?.(nudge);
+			} catch (e) {
+				this.emit(
+					"agent_error",
+					leader.name,
+					`leader wake failed: ${e instanceof Error ? e.message : String(e)}`,
+				);
+				break;
+			}
+			// Wake finished workers so queued assignments (sent by the leader
+			// during its resumed loop) are processed. A bare continue() often
+			// ends immediately, so nudge them to actually check the board/mailbox.
+			await Promise.allSettled(
+				[...(this.state?.workers.values() ?? [])].map((h) =>
+					h.session?.wake?.(
+						"[协调器] 你可能有新分配的任务。请用 team_tasks list 查看任务板、检查收到的消息，" +
+						"认领并执行你的任务，完成后用 team_tasks complete 标记。",
+					) ?? Promise.resolve(),
+				),
+			);
+		}
 	}
 
 	private async runAgent(name: string, session: TeamAgentSession): Promise<void> {
@@ -485,5 +540,30 @@ export class TeamCoordinator extends EventEmitter {
 
 	getState(): TeamState | undefined {
 		return this.state;
+	}
+
+	/**
+	 * Task-board completion snapshot, used by the start_team result so callers
+	 * can see whether the team actually finished its work (not just "ended").
+	 */
+	getCompletion(): {
+		total: number;
+		done: number;
+		pending: number;
+		verdict: "complete" | "partial" | "no-tasks";
+		pendingIds: string[];
+	} {
+		const tasks = this.state?.tasks ?? [];
+		const done = tasks.filter((t) => t.status === "done").length;
+		const pending = tasks.filter((t) => t.status !== "done");
+		let verdict: "complete" | "partial" | "no-tasks" = "no-tasks";
+		if (tasks.length > 0) verdict = pending.length === 0 ? "complete" : "partial";
+		return {
+			total: tasks.length,
+			done,
+			pending: pending.length,
+			verdict,
+			pendingIds: pending.map((t) => t.id),
+		};
 	}
 }

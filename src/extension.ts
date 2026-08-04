@@ -220,6 +220,18 @@ function formatTeamResult(coordinator: TeamCoordinator): string {
 	const merges = coordinator.getResults();
 	const lines: string[] = [];
 	lines.push(`团队 "${state?.name ?? "?"}" 运行完成。`);
+
+	// Completion verdict — makes a stalled team visible instead of looking
+	// identical to a successful one (the reason the coordinator now nudges
+	// the leader back into work via driveToCompletion).
+	const completion = coordinator.getCompletion();
+	const verdictLabel =
+		completion.verdict === "complete"
+			? `✅ 全部完成（${completion.done}/${completion.total} 任务）`
+			: completion.verdict === "partial"
+				? `⚠️ 部分完成（${completion.done}/${completion.total}，未完成: ${completion.pendingIds.join(", ")}）`
+				: "❌ 无任务产出（leader 未创建任务板）";
+	lines.push(`完成判定：${verdictLabel}`);
 	if (members.length > 0) {
 		lines.push("", "成员产出：");
 		for (const m of members) {

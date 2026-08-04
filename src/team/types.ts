@@ -97,6 +97,8 @@ export interface TeamAgentSessionLike {
 	readonly isLeader: boolean;
 	start(): Promise<void>;
 	stop(): Promise<void>;
+	/** Re-activate a finished agent so it processes queued steering messages. */
+	wake?(nudge?: string): Promise<void>;
 	/** Final output summary (last assistant message, truncated). */
 	getFinalSummary?(): string;
 }
@@ -135,6 +137,12 @@ export interface TeamConfig {
 	maxMessagesPerAgent?: number;
 	/** Steering-bridge poll interval in ms. Default 500. */
 	pollIntervalMs?: number;
+	/**
+	 * Max times the coordinator nudges the leader back into its ReAct loop
+	 * when the task board still has unfinished tasks after all members' loops
+	 * ended (prevents premature "team done"). Default 3.
+	 */
+	maxLeaderWakeups?: number;
 	/** MCP servers to inject into every member's tool set. */
 	mcpServers?: McpServerConfig[];
 }

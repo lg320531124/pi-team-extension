@@ -183,6 +183,30 @@ export class TeamAgentSession implements TeamAgentSessionLike {
 		this.done = true;
 	}
 
+	/**
+	 * Re-activate a finished agent so it processes queued steering/mailbox
+	 * messages. Used by the coordinator's completion check: when every member's
+	 * ReAct loop has ended but the task board still has unfinished tasks, the
+	 * leader (and any worker with queued assignments) is nudged back into its
+	 * loop instead of declaring a hollow "team done".
+	 *
+	 * The bridge timer from start() is still running; with done=false it resumes
+	 * draining the mailbox into steer(). continue() then runs the loop and
+	 * consumes the queued steering messages (including nudge).
+	 */
+	async wake(nudge?: string): Promise<void> {
+		if (!this.done) return; // loop still running — nothing to wake
+		if (nudge) {
+			this.agent.steer({
+				role: "user",
+				content: [{ type: "text", text: nudge }],
+				timestamp: Date.now(),
+			});
+		}
+		this.done = false;
+		await this.agent.continue();
+	}
+
 	/** True once the agent's ReAct loop has emitted agent_end. */
 	isDone(): boolean {
 		return this.done;
