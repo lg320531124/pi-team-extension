@@ -17,6 +17,26 @@ import { Mailbox } from "./mailbox.js";
 import { MessageBus } from "./message-bus.js";
 import type { TeamAgentSessionLike, TeamMessage } from "./types.js";
 
+/**
+ * Transient provider/network failures that are safe to retry. The bare Agent
+ * used in team mode skips pi's session-level auto-retry, so a single dropped
+ * stream (e.g. "Stream ended without finish_reason") would otherwise kill the
+ * worker's whole run — and with it the team run. Intentional stops
+ * ("Request was aborted") deliberately never match.
+ */
+const TRANSIENT_ERROR_RE =
+	/Stream ended without finish_reason|fetch failed|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|UND_ERR|network error|\b429\b|\b5\d\d\b|rate limit/i;
+
+function isTransientError(err: unknown): boolean {
+	const msg = err instanceof Error ? err.message : String(err);
+	return TRANSIENT_ERROR_RE.test(msg) && !/aborted/i.test(msg);
+}
+
+/** Base delay for the first retry; doubles per attempt. */
+const RETRY_DELAY_BASE_MS = 1_000;
+/** Retries after the initial attempt (3 tries total). */
+const MAX_RETRIES = 2;
+
 export interface TeamAgentSessionOptions {
 	name: string;
 	isLeader: boolean;
@@ -49,8 +69,11 @@ export class TeamAgentSession implements TeamAgentSessionLike {
 	private readonly messageBus: MessageBus;
 	private readonly pollIntervalMs: number;
 	private readonly maxMessagesPerAgent?: number;
+	private readonly teamMemberNames: string[];
 	private bridgeTimer: ReturnType<typeof setInterval> | undefined;
 	private done = false;
+	/** Error captured at agent_end; reported to the leader only when retries are exhausted. */
+	private pendingError: string | undefined;
 
 	constructor(opts: TeamAgentSessionOptions) {
 		this.name = opts.name;
@@ -59,6 +82,7 @@ export class TeamAgentSession implements TeamAgentSessionLike {
 		this.messageBus = opts.messageBus;
 		this.pollIntervalMs = opts.pollIntervalMs ?? 500;
 		this.maxMessagesPerAgent = opts.maxMessagesPerAgent;
+		this.teamMemberNames = opts.teamMemberNames;
 
 		const systemPrompt = this.buildSystemPrompt(opts);
 		const allTools = [...opts.builtinTools, ...opts.teamTools];
@@ -80,18 +104,15 @@ export class TeamAgentSession implements TeamAgentSessionLike {
 		this.agent = new Agent(agentOptions as ConstructorParameters<typeof Agent>[0]);
 
 		// Auto-notify leader on agent errors (CC v2.1.198+ behavior). pi surfaces
-		// the last error on agent.state.errorMessage after agent_end.
+		// the last error on agent.state.errorMessage after agent_end. The
+		// notification is deferred to runWithTransientRetry so a recovered
+		// transient failure is never reported as fatal.
 		this.agent.subscribe(async (event: AgentEvent) => {
 			if (event.type === "agent_end") {
 				this.done = true;
 				const err = this.agent.state.errorMessage;
 				if (err && !this.isLeader) {
-					await this.messageBus.send(
-						this.name,
-						this.findLeaderName(opts.teamMemberNames),
-						`[system] turn ended with error: ${err}`,
-						this.maxMessagesPerAgent,
-					);
+					this.pendingError = err;
 				}
 			}
 		});
@@ -162,8 +183,8 @@ export class TeamAgentSession implements TeamAgentSessionLike {
 		// Kick off the initial prompt; the ReAct loop runs to completion.
 		// If the agent finishes, queued steering/follow-up messages will wake it
 		// via agent.continue() — the mailbox bridge calls steer(), and a subsequent
-		// prompt/continue drains it.
-		await this.agent.prompt(this.buildInitialPrompt());
+		// prompt/continue drains it. Transient provider failures are retried.
+		await this.runWithTransientRetry(() => this.agent.prompt(this.buildInitialPrompt()));
 	}
 
 	private buildInitialPrompt(): string {
@@ -204,7 +225,66 @@ export class TeamAgentSession implements TeamAgentSessionLike {
 			});
 		}
 		this.done = false;
-		await this.agent.continue();
+		try {
+			await this.runWithTransientRetry(() => this.agent.continue());
+		} catch (err) {
+			// The loop has actually ended — a failed wake must not leave the
+			// session looking alive to the coordinator's completion check.
+			this.done = true;
+			throw err;
+		}
+	}
+
+	/**
+	 * Run a prompt/continue attempt with bounded retries for transient
+	 * provider/network failures (e.g. "Stream ended without finish_reason").
+	 * The bare Agent used here omits pi's session-level auto-retry, so without
+	 * this a single dropped stream killed the worker — and with it the team run.
+	 */
+	private async runWithTransientRetry(run: () => Promise<void>): Promise<void> {
+		for (let attempt = 0; ; attempt++) {
+			try {
+				await run();
+				this.pendingError = undefined; // transient failure recovered — nothing to report
+				return;
+			} catch (err) {
+				if (!isTransientError(err) || attempt >= MAX_RETRIES) {
+					await this.notifyLeaderOnFailure();
+					throw err;
+				}
+				// The agent appended an empty assistant error placeholder; drop it
+				// so the retry replays from the pre-failure transcript.
+				this.discardFailedTurnMessage();
+				const delayMs = RETRY_DELAY_BASE_MS * 2 ** attempt;
+				console.warn(
+					`[team] ${this.name}: transient error (${err instanceof Error ? err.message : String(err)}); retrying in ${delayMs}ms (attempt ${attempt + 2}/${MAX_RETRIES + 1})`,
+				);
+				await new Promise((r) => setTimeout(r, delayMs));
+			}
+		}
+	}
+
+	/** Report the terminal run error to the leader once the retry budget is spent. */
+	private async notifyLeaderOnFailure(): Promise<void> {
+		if (this.isLeader || !this.pendingError) return;
+		await this.messageBus.send(
+			this.name,
+			this.findLeaderName(this.teamMemberNames),
+			`[system] turn ended with error: ${this.pendingError}`,
+			this.maxMessagesPerAgent,
+		);
+		this.pendingError = undefined;
+	}
+
+	/** Remove the empty assistant error placeholder the agent appended on failure. */
+	private discardFailedTurnMessage(): void {
+		const messages = this.agent.state.messages;
+		const last = messages[messages.length - 1];
+		if (!last || last.role !== "assistant" || last.stopReason !== "error") return;
+		const hasText = (last.content ?? []).some(
+			(c) => c.type === "text" && c.text.length > 0,
+		);
+		if (!hasText) messages.pop();
 	}
 
 	/** True once the agent's ReAct loop has emitted agent_end. */
