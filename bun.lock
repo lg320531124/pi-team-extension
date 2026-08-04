@@ -5,15 +5,18 @@
     "": {
       "name": "pi-team-extension",
       "dependencies": {
-        "@earendil-works/pi-agent-core": "^0.82.0",
-        "@earendil-works/pi-ai": "^0.82.0",
-        "@earendil-works/pi-coding-agent": "^0.82.0",
+        "yaml": "^2.9.0",
       },
       "devDependencies": {
         "@types/node": "^22.0.0",
         "ignore": "^7.0.6",
         "typescript": "^5.5.0",
-        "yaml": "^2.9.0",
+      },
+      "peerDependencies": {
+        "@earendil-works/pi-agent-core": "*",
+        "@earendil-works/pi-ai": "*",
+        "@earendil-works/pi-coding-agent": "*",
+        "typebox": "*",
       },
     },
   },
