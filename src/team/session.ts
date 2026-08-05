@@ -37,6 +37,23 @@ const RETRY_DELAY_BASE_MS = 1_000;
 /** Retries after the initial attempt (3 tries total). */
 const MAX_RETRIES = 2;
 
+/**
+ * Thrown when a run stalls: the provider stream neither errors nor finishes
+ * (e.g. a hung connection), so `await agent.prompt/continue()` would never
+ * resolve. Treated as a transient failure — abort and retry.
+ */
+class StreamTimeoutError extends Error {
+	constructor(idleMs: number) {
+		super(`stream stalled: no agent events for ${Math.round(idleMs / 1000)}s`);
+		this.name = "StreamTimeoutError";
+	}
+}
+
+/** No agent event for this long → the stream is hung; abort and retry. */
+const STREAM_HEARTBEAT_MS = 5 * 60_000;
+/** How often the heartbeat checks for stalls. */
+const HEARTBEAT_CHECK_MS = 10_000;
+
 export interface TeamAgentSessionOptions {
 	name: string;
 	isLeader: boolean;
@@ -59,6 +76,10 @@ export interface TeamAgentSessionOptions {
 	pollIntervalMs?: number;
 	/** Max messages this agent may send before being blocked. */
 	maxMessagesPerAgent?: number;
+	/** No agent event for this long → stream considered hung (default 5 min). */
+	streamHeartbeatMs?: number;
+	/** How often the heartbeat checks for stalls (default 10 s). */
+	heartbeatCheckMs?: number;
 }
 
 export class TeamAgentSession implements TeamAgentSessionLike {
@@ -70,6 +91,8 @@ export class TeamAgentSession implements TeamAgentSessionLike {
 	private readonly pollIntervalMs: number;
 	private readonly maxMessagesPerAgent?: number;
 	private readonly teamMemberNames: string[];
+	private readonly streamHeartbeatMs: number;
+	private readonly heartbeatCheckMs: number;
 	private bridgeTimer: ReturnType<typeof setInterval> | undefined;
 	private done = false;
 	/** Error captured at agent_end; reported to the leader only when retries are exhausted. */
@@ -83,6 +106,8 @@ export class TeamAgentSession implements TeamAgentSessionLike {
 		this.pollIntervalMs = opts.pollIntervalMs ?? 500;
 		this.maxMessagesPerAgent = opts.maxMessagesPerAgent;
 		this.teamMemberNames = opts.teamMemberNames;
+		this.streamHeartbeatMs = opts.streamHeartbeatMs ?? STREAM_HEARTBEAT_MS;
+		this.heartbeatCheckMs = opts.heartbeatCheckMs ?? HEARTBEAT_CHECK_MS;
 
 		const systemPrompt = this.buildSystemPrompt(opts);
 		const allTools = [...opts.builtinTools, ...opts.teamTools];
@@ -237,18 +262,20 @@ export class TeamAgentSession implements TeamAgentSessionLike {
 
 	/**
 	 * Run a prompt/continue attempt with bounded retries for transient
-	 * provider/network failures (e.g. "Stream ended without finish_reason").
-	 * The bare Agent used here omits pi's session-level auto-retry, so without
-	 * this a single dropped stream killed the worker — and with it the team run.
+	 * provider/network failures (e.g. "Stream ended without finish_reason" or a
+	 * hung stream). The bare Agent used here omits pi's session-level
+	 * auto-retry, so without this a single dropped stream killed the worker —
+	 * and with it the team run.
 	 */
 	private async runWithTransientRetry(run: () => Promise<void>): Promise<void> {
 		for (let attempt = 0; ; attempt++) {
 			try {
-				await run();
+				await this.runWithHeartbeat(run);
 				this.pendingError = undefined; // transient failure recovered — nothing to report
 				return;
 			} catch (err) {
-				if (!isTransientError(err) || attempt >= MAX_RETRIES) {
+				const transient = err instanceof StreamTimeoutError || isTransientError(err);
+				if (!transient || attempt >= MAX_RETRIES) {
 					await this.notifyLeaderOnFailure();
 					throw err;
 				}
@@ -261,6 +288,48 @@ export class TeamAgentSession implements TeamAgentSessionLike {
 				);
 				await new Promise((r) => setTimeout(r, delayMs));
 			}
+		}
+	}
+
+	/**
+	 * Watch a run for stalls: any agent event (message deltas, tool calls,
+	 * agent_end) counts as life. Long tool executions (installs, tests) may be
+	 * legitimately quiet for a while, hence the generous 5-minute threshold —
+	 * but a stream that neither errors nor finishes must not hang the team
+	 * forever, which is exactly what happened before this guard existed (the
+	 * coordinator's wake/continue never resolved and start_team never returned).
+	 */
+	private async runWithHeartbeat(run: () => Promise<void>): Promise<void> {
+		let lastEventAt = Date.now();
+		let stalled = false;
+		let idleMsAtAbort = 0;
+		const unsub = this.agent.subscribe(() => {
+			lastEventAt = Date.now();
+		});
+		const heartbeat = setInterval(() => {
+			const idleMs = Date.now() - lastEventAt;
+			if (!stalled && idleMs > this.streamHeartbeatMs) {
+				stalled = true;
+				idleMsAtAbort = idleMs;
+				console.warn(
+					`[team] ${this.name}: no agent events for ${Math.round(idleMs / 1000)}s — aborting hung stream`,
+				);
+				this.agent.abort();
+			}
+		}, this.heartbeatCheckMs);
+		try {
+			try {
+				await run();
+			} catch (err) {
+				// An abort we caused is a stall, not an intentional stop — surface
+				// it as a retryable StreamTimeoutError so the retry loop treats it
+				// as transient (plain "Request was aborted" must not retry).
+				if (stalled) throw new StreamTimeoutError(idleMsAtAbort);
+				throw err;
+			}
+		} finally {
+			clearInterval(heartbeat);
+			unsub();
 		}
 	}
 
